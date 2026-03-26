@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  broker:
+    build: ./broker
+    container_name: iot_broker
+    ports:
+      - "9998:9998/udp"
+      - "9999:9999/tcp"
+    networks:
+      - iot_net
+    command: python3 iot_broker.py
+
+  light_sensor:
+    build: ./light_sensor
+    container_name:  light_sensor
+    depends_on:
+      - broker
+    networks:
+      - iot_net
+    command: python3 light_virtual_sensor.py
+    environment:
+      - BROKER_IP=broker
+      - BROKER_PORT=9998
+
+  temperature_sensor:
+    build: ./temperature_sensor
+    container_name: temperature_sensor
+    depends_on:
+      - broker
+    networks:
+      - iot_net 
+    command: python3 temperature_virtual_sensor.py 
+    environment:
+      - BROKER_IP=broker
+      - BROKER_PORT=9998
+
+  gas_sensor:
+    build: ./gas_sensor
+    container_name: gas_sensor
+    depends_on:
+      - broker
+    networks:
+      - iot_net
+    command: python3 gas_virtual_sensor.py
+    environment:
+      - BROKER_IP=broker
+      - BROKER_PORT=9998
+
+  humidity_sensor:
+    build: ./humidity_sensor
+    container_name: humidity_sensor
+    depends_on:
+      - broker
+    networks:
+      - iot_net
+    command: python3 humidity_virtual_sensor.py
+    environment:
+      - BROKER_IP=broker
+      - BROKER_PORT=9998
+    
+networks:
+  iot_net:
+    driver: bridge
