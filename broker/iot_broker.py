@@ -1,85 +1,39 @@
 import socket
+from aux import *
 import threading
-import json
 
-UDP_PORT = 9998
-TCP_PORT = 9999
-
-connected_sensors = {}
-
-def udp_listener():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", UDP_PORT))
-
-    print(f"[BROKER] Escutando dados UDP na porta {UDP_PORT}")
-
-    while True:
-        data, addr = sock.recvfrom(4096)
-
+def handle_client(connection, address):
+    """Essa função roda em uma Thread separada para cada cliente."""
+    print(f"🧵 Thread iniciada para {address}")
+    with connection:
         try:
-            message = json.loads(data.decode())
+            while True:
+                packet_type, flags, remaining_length = read_fixed_header(connection)
+                
+                if packet_type is None: break
+                
+                payload_data = connection.recv(remaining_length) if remaining_length > 0 else b''
+                
+                match packet_type:
+                    case Pkt.CONNECT:
+                        sent_connack(connection)
+                    case Pkt.PUBLISH:
+                        process_publisher(connection, flags, payload_data)
+                    case Pkt.SUBSCRIBE:
+                        register_subscription(connection, payload_data)
+                    case Pkt.DISCONNECT:
+                        break
+        except Exception as e:
+            print(f"⚠️ Erro no cliente {address}: {e}")
+    print(f"🔌 Conexão encerrada com {address}")
 
-            print("\n--- DADO RECEBIDO ---")
-            print("Sensor:", message.get("source"))
-            print("Tipo:", message.get("type"))
-            print("Tempo:", message.get("time"))
-            print("Dados:", message.get("data"))
-
-        except:
-            print("Mensagem inválida:", data)
-
-def handle_sensor(conn, addr):
-    print(f"[BROKER] Sensor conectado: {addr}")
-
-    try:
-        while True:
-            data = conn.recv(1024)
-            if not data:
-                break
-            message = json.loads(data.decode())
-            if message["type"] == "register":
-                sensor_name = message["name"]
-                connected_sensors[sensor_name] = conn
-                print(f"[BROKER] Sensor registrado: {sensor_name}")
+def start_broker():
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(100)
     
-    except:
-        pass
-
-    conn.close()
-    print(f"[BROKER] Sensor desconectado: {addr}")
-
-#################
-def tcp_server():
-    """
-    Servidor TCP para registro e comandos
-    """
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("0.0.0.0", TCP_PORT))
-    sock.listen()
-
-    print(f"[BROKER] Servidor TCP escutando na porta {TCP_PORT}")
-
     while True:
-
-        conn, addr = sock.accept()
-
-        thread = threading.Thread(target=handle_sensor, args=(conn, addr))
-        thread.start()
-
-def main():
-
-    print("BROKER INICIADO\n")
-
-    udp_thread = threading.Thread(target=udp_listener)
-    tcp_thread = threading.Thread(target=tcp_server)
-
-    udp_thread.start()
-    tcp_thread.start()
-
-    udp_thread.join()
-    tcp_thread.join()
-
-
-if __name__ == "__main__":
-    main()
+        conn, addr = server_socket.accept()
+        client_thread = threading.Thread(target=handle_client, args=(conn, addr))
+        client_thread.daemon = True 
+        client_thread.start()
