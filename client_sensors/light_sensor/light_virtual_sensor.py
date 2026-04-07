@@ -1,101 +1,88 @@
 import socket
 import json
 import time
-import math
 import random
 
-# Network Config
 BROKER_IP = "127.0.0.1"
 PORT = 1883
 CLIENT_ID = "LIGHT_NODE_03"
 TOPIC = "greenhouse/light"
 
-# --- HARDWARE LAYER (DATA ACQUISITION) ---
-def read_sensor_data():
-    """
-    Simulates a BH1750 or LDR sensor measuring luminosity in Lux.
-    Uses a sine wave base to simulate the 24h solar cycle + random noise.
-    """
-    # 1. Base cycle (Simulation of daylight based on system time)
-    t = time.localtime()
-    seconds_since_midnight = t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec
-    day_fraction = seconds_since_midnight / 86400
+def read_sensor_data(last_value):
+    drift = random.uniform(-15.0, 15.0)
     
-    # Peak at 12:00 PM (Sine wave)
-    intensity = math.sin((day_fraction * 2 * math.pi) - (math.pi / 2))
-    ambient_lux = max(0, intensity * 800) # Max 800 Lux (bright day)
+    if last_value > 900.0: drift -= 10.0
+    if last_value < 100.0: drift += 10.0
     
-    # 2. Add high-frequency noise or "events" (cloud passing or light switch)
-    event_noise = random.uniform(-5, 5)
-    if random.random() > 0.97:
-        event_noise += 200 # Sudden light increase
-        
-    return round(max(0, ambient_lux + event_noise), 1)
+    new_lux = last_value + drift
+    return round(max(0.0, new_lux), 1)
 
-# --- NETWORK LAYER (BITWISE PROTOCOL) ---
+def encode_remaining_length(length):
+    encoded = bytearray()
+    while True:
+        byte = length % 128
+        length //= 128
+        if length > 0:
+            byte |= 0x80
+        encoded.append(byte)
+        if length == 0:
+            break
+    return encoded
+
+def build_connect_packet(client_id):
+    proto = "MQTT".encode('utf-8')
+    var_h = bytearray([0x00, 0x04]) + proto + bytearray([0x04, 0x02, 0x00, 0x3C])
+    cid = client_id.encode('utf-8')
+    payload = bytearray([len(cid) >> 8, len(cid) & 0xFF]) + cid
+    rl_bytes = encode_remaining_length(len(var_h) + len(payload))
+    return bytearray([0x10]) + rl_bytes + var_h + payload
+
 def build_mqtt_packet(packet_type, topic, payload_dict):
-    """
-    Constructs a raw MQTT-like packet using bitwise operations.
-    [Control Header] [Remaining Length] [Topic Length MSB/LSB] [Topic] [Payload]
-    """
     payload = json.dumps(payload_dict).encode('utf-8')
     topic_bytes = topic.encode('utf-8')
     
-    # 1. Control Packet Type (3 = PUBLISH) << 4
-    # Result: 0x30
     header = (packet_type << 4) | 0x00
-    
-    # 2. Topic Length (2-byte MSB/LSB) - Critical for Broker's parser
     topic_len = len(topic_bytes)
     topic_header = bytearray([topic_len >> 8, topic_len & 0xFF])
     
-    # 3. Remaining Length (Bytes following the length byte)
-    remaining_length = len(topic_header) + len(topic_bytes) + len(payload)
+    var_h_and_payload = topic_header + topic_bytes + payload
+    rl_bytes = encode_remaining_length(len(var_h_and_payload))
     
-    packet = bytearray()
-    packet.append(header)
-    
-    # Encoding length (Standard 7-bit encoding for small packets)
-    packet.append(remaining_length & 0x7F)
-    
-    packet.extend(topic_header)
-    packet.extend(topic_bytes)
-    packet.extend(payload)
-    
-    return packet
+    return bytearray([header]) + rl_bytes + var_h_and_payload
 
 def run_node():
-    print(f"[{CLIENT_ID}] Starting Optical Monitoring System...")
+    current_lux = 500.0 
+    print(f"[{CLIENT_ID}] Initializing Light Monitoring Node...")
     
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((BROKER_IP, PORT))
-        print(f"[{CLIENT_ID}] Connected to Fransmitto Broker.")
+        
+        conn_pkt = build_connect_packet(CLIENT_ID)
+        sock.sendall(conn_pkt)
+        time.sleep(0.5)
+        
+        print(f"[{CLIENT_ID}] Successfully connected to Fransmitto.")
 
         while True:
-            # 1. Read (Hardware Abstraction)
-            current_lux = read_sensor_data()
+            current_lux = read_sensor_data(current_lux)
             
-            # 2. Prepare Payload
             data = {
                 "id": CLIENT_ID,
-                "lux": current_lux,
-                "unit": "lx",
+                "value": current_lux,
+                "unit": "lux",
                 "ts": int(time.time())
             }
             
-            # 3. Bitwise Assembly and Transmission
             packet = build_mqtt_packet(3, TOPIC, data)
             sock.sendall(packet)
             
-            # Monitoring Output
-            print(f"[{CLIENT_ID}] Luminosity: {current_lux} Lux")
+            print(f"[{CLIENT_ID}] Luminosity: {current_lux} lux | Sent {len(packet)} bytes.")
             
-            # Sampling rate: 2 seconds (faster for lighting automation)
             time.sleep(2)
             
     except Exception as e:
-        print(f"[{CLIENT_ID}] Runtime Error: {e}")
+        print(f"[{CLIENT_ID}] Connection Lost: {e}")
     finally:
         sock.close()
 
