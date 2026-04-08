@@ -4,7 +4,7 @@ services:
     container_name: iot_broker
     ports:
       - "8000:8000"
-      - "9999:9999/tcp"
+      - "9998:9998/tcp"
     command: python3 iot_broker.py
 
   light_sensor:
@@ -13,8 +13,8 @@ services:
     command: python3 light_virtual_sensor.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.100"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
 
   temperature_sensor:
     build: ./client_sensors/temperature_sensor
@@ -22,8 +22,8 @@ services:
     command: python3 temperature_virtual_sensor.py 
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.100"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
 
   gas_sensor:
     build: ./client_sensors/gas_sensor
@@ -31,8 +31,8 @@ services:
     command: python3 gas_virtual_sensor.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.101"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
 
   humidity_sensor:
     build: ./client_sensors/humidity_sensor
@@ -40,8 +40,8 @@ services:
     command: python3 humidity_virtual_sensor.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.101"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
 
   act_irrigation:
     build: ./client_actuators/act_irrigation
@@ -49,8 +49,8 @@ services:
     command: python3 act_irrigation.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.100"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
 
   act_curtain:
     build: ./client_actuators/act_curtain
@@ -58,8 +58,8 @@ services:
     command: python3 act_curtain.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.101"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
 
   client:
     build: ./client
@@ -67,8 +67,8 @@ services:
     command: python3 iot_client.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "192.168.0.100"
-      BROKER_PORT: "9999"
+      BROKER_IP: "172.16.201.8"
+      BROKER_PORT: "9998"
       DISPLAY: ":0"
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
