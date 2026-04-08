@@ -4,7 +4,6 @@ services:
     container_name: iot_broker
     ports:
       - "8000:8000"
-      - "9998:9998/udp"
       - "9999:9999/tcp"
     command: python3 iot_broker.py
 
