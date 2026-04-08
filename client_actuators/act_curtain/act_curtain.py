@@ -3,6 +3,8 @@ import json
 import time
 import threading
 import os
+import logging
+
 
 BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
 PORT = int(os.environ.get("BROKER_PORT", "9998"))
@@ -70,7 +72,8 @@ def process_command(raw_payload):
         data = json.loads(raw_payload.decode('utf-8'))
         target_pos = data.get("position", current_position)
         if target_pos > current_position:
-            print(f"[{CLIENT_ID}] Closing to {target_pos}%...")
+            #print(f"[{CLIENT_ID}] Closing to {target_pos}%...")
+            logging.warning(f"[{CLIENT_ID}] Closing to {target_pos}%...")
         elif target_pos < current_position:
             print(f"[{CLIENT_ID}] Opening to {target_pos}%...")
         current_position = target_pos

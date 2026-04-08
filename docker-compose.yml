@@ -61,16 +61,16 @@ services:
       BROKER_IP: "172.16.201.16"
       BROKER_PORT: "9998"
 
-  client:
-    build: ./client
-    container_name: iot_dashboard
-    command: python3 iot_client.py
-    restart: unless-stopped
-    environment:
-      BROKER_IP: "172.16.201.16"
-      BROKER_PORT: "9998"
-      DISPLAY: $DISPLAY
-      XAUTHORITY: /.Xauthority
-    volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ~/.Xauthority:/.Xauthority:ro
+  # client:
+  #   build: ./client
+  #   container_name: iot_dashboard
+  #   command: python3 iot_client.py
+  #   restart: unless-stopped
+  #   environment:
+  #     BROKER_IP: "172.16.201.16"
+  #     BROKER_PORT: "9998"
+  #     DISPLAY: $DISPLAY
+  #     XAUTHORITY: /.Xauthority
+  #   volumes:
+  #     - /tmp/.X11-unix:/tmp/.X11-unix:rw
+  #     - ~/.Xauthority:/.Xauthority:ro
