@@ -4,7 +4,7 @@ import time
 import threading
 
 BROKER_IP = "127.0.0.1"
-PORT = 1883
+PORT = 9998
 CLIENT_ID = "ACT_CURTAIN_01"
 COMMAND_TOPIC = "greenhouse/actuators/curtain"
 current_position = 0

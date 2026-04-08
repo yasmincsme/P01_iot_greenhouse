@@ -6,7 +6,7 @@ import threading
 import time
 
 BROKER_IP = "127.0.0.1"
-PORT = 1883
+PORT = 9998
 CLIENT_ID = "CLI_DASH_01"
 
 ctk.set_appearance_mode("dark")

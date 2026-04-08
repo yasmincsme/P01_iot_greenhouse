@@ -360,10 +360,10 @@ def start_broker():
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(('0.0.0.0', 1883))
+    server_socket.bind(('0.0.0.0', 9998))
     server_socket.listen(100)
     
-    print("[SYSTEM] MQTT Broker started on 0.0.0.0:1883. Awaiting connections...")
+    print("[SYSTEM] MQTT Broker started on 0.0.0.0:9998. Awaiting connections...")
     
     while True:
         conn, addr = server_socket.accept()
