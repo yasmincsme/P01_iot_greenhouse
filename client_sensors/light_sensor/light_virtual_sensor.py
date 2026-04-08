@@ -7,17 +7,17 @@ import logging
 
 BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
 PORT = int(os.environ.get("BROKER_PORT", "9998"))
-CLIENT_ID = "HUMID_NODE_02"
-TOPIC = "greenhouse/humidity"
+CLIENT_ID = "LIGHT_NODE_03"
+TOPIC = "greenhouse/light"
 
 def read_sensor_data(last_value):
-    drift = random.uniform(-0.15, 0.15)
+    drift = random.uniform(-15.0, 15.0)
     
-    if last_value > 85: drift -= 0.1
-    if last_value < 35: drift += 0.1
+    if last_value > 900.0: drift -= 10.0
+    if last_value < 100.0: drift += 10.0
     
-    new_rh = last_value + drift
-    return round(max(0, min(100, new_rh)), 1)
+    new_lux = last_value + drift
+    return round(max(0.0, new_lux), 1)
 
 def encode_remaining_length(length):
     encoded = bytearray()
@@ -53,8 +53,8 @@ def build_mqtt_packet(packet_type, topic, payload_dict):
     return bytearray([header]) + rl_bytes + var_h_and_payload
 
 def run_node():
-    current_rh = 60.0 
-    logging.warning(f"[{CLIENT_ID}] Starting Humidity Monitoring System...")
+    current_lux = 500.0 
+    logging.warning(f"[{CLIENT_ID}] Starting Light Monitoring System...")
     
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -67,25 +67,24 @@ def run_node():
         logging.warning(f"[{CLIENT_ID}] Connected to BROKER at {BROKER_IP}:{PORT}.")
 
         while True:
-            current_rh = read_sensor_data(current_rh)
+            current_lux = read_sensor_data(current_lux)
             
             data = {
                 "id": CLIENT_ID,
-                "value": current_rh,
-                "unit": "%",
+                "value": current_lux,
+                "unit": "lux",
                 "ts": int(time.time())
             }
             
             packet = build_mqtt_packet(3, TOPIC, data)
             sock.sendall(packet)
             
-            logging.warning(f"[{CLIENT_ID}] Humidity: {current_rh}%")
+            logging.warning(f"[{CLIENT_ID}] Light Level: {current_lux} lux")
             
-            time.sleep(10)
+            time.sleep(2)
             
     except Exception as e:
         logging.warning(f"[{CLIENT_ID}] Connection Failed: {e}")
-
     finally:
         sock.close()
 
