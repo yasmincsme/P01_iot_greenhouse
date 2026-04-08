@@ -4,15 +4,15 @@ import socket
 import json
 import threading
 import time
+import os
+import math
 
-BROKER_IP = "127.0.0.1"
-PORT = 9998
+BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
+PORT = int(os.environ.get("BROKER_PORT", "9998"))
 CLIENT_ID = "CLI_DASH_01"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
-
-import math
 
 class EnvironmentalAI:
     MAX_TEMP = 50.0
@@ -20,7 +20,6 @@ class EnvironmentalAI:
     MAX_GAS = 217.79
     MAX_LIGHT = 1086.46
 
-    # Pesos da Camada Oculta (4 entradas x 8 neurônios)
     W1 = [
         [0.76127756, -1.14999, -1.3243964, 1.0532789, -0.5648892, -0.35137573, -0.02234721, -0.97573954],
         [0.0390515, 0.19636367, 0.04113916, -0.27672333, 1.0549195, 0.55996454, -0.11504948, 1.0107998],
@@ -29,7 +28,6 @@ class EnvironmentalAI:
     ]
     b1 = [0.23017338, 0.32451043, 0.7052842, -0.37595168, 0.09138247, 0.06862238, -0.2987081, 0.32811505]
 
-    # Pesos da Camada de Saída (8 neurônios x 1 saída)
     W2 = [-2.3351076, -1.8962342, -4.0220113, -0.7348212, 1.2856134, 1.095262, -1.9509647, 1.2919254]
     b2 = 0.2667996
 
@@ -39,14 +37,12 @@ class EnvironmentalAI:
 
     @staticmethod
     def _sigmoid(x):
-        # Proteção contra overflow matemático (math domain error)
         if x < -709: return 0.0
         if x > 709: return 1.0
         return 1.0 / (1.0 + math.exp(-x))
 
     @classmethod
     def predict_life_chance(cls, temp, hum, gas, lux):
-        # 1. Normalização das entradas
         x = [
             temp / cls.MAX_TEMP,
             hum / cls.MAX_HUM,
@@ -54,7 +50,6 @@ class EnvironmentalAI:
             lux / cls.MAX_LIGHT
         ]
 
-        # 2. Camada Oculta (Dense + ReLU)
         hidden = [0.0] * 8
         for i in range(8):
             hidden[i] = cls.b1[i]
@@ -62,12 +57,10 @@ class EnvironmentalAI:
                 hidden[i] += x[j] * cls.W1[j][i]
             hidden[i] = cls._relu(hidden[i])
 
-        # 3. Camada de Saída (Dense + Sigmoid)
         output = cls.b2
         for i in range(8):
             output += hidden[i] * cls.W2[i]
 
-        # 4. Retorna a porcentagem final
         chance = cls._sigmoid(output)
         return chance * 100.0
 
@@ -128,7 +121,7 @@ class GreenhouseDashboard(ctk.CTk):
         ctk.CTkLabel(health_card, text="ENVIRONMENTAL INDEX", font=("Consolas", 11), text_color="gray").pack(pady=(16, 4))
         self.health_label = ctk.CTkLabel(health_card, text="0.0", font=("Consolas", 48, "bold"), text_color="#22c55e")
         self.health_label.pack(expand=True)
-        ctk.CTkLabel(health_card, text="|temp| + |rh| + |lux| + |gas|", font=("Consolas", 9), text_color="gray").pack(pady=(0, 16))
+        ctk.CTkLabel(health_card, text="Prediction Model", font=("Consolas", 9), text_color="gray").pack(pady=(0, 16))
 
         cmd_card = ctk.CTkFrame(mid, corner_radius=10)
         cmd_card.grid(row=0, column=1, padx=(4, 0), sticky="nsew")
