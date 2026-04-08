@@ -5,7 +5,7 @@ import random
 import os
 
 BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
-PORT = int(os.environ.get("BROKER_PORT", "1883"))
+PORT = int(os.environ.get("BROKER_PORT", "9998"))
 CLIENT_ID = "HUMID_NODE_02"
 TOPIC = "greenhouse/humidity"
 
