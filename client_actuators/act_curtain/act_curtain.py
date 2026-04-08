@@ -72,18 +72,17 @@ def process_command(raw_payload):
         data = json.loads(raw_payload.decode('utf-8'))
         target_pos = data.get("position", current_position)
         if target_pos > current_position:
-            #print(f"[{CLIENT_ID}] Closing to {target_pos}%...")
             logging.warning(f"[{CLIENT_ID}] Closing to {target_pos}%...")
         elif target_pos < current_position:
-            print(f"[{CLIENT_ID}] Opening to {target_pos}%...")
+            logging.warning(f"[{CLIENT_ID}] Opening to {target_pos}%...")
         current_position = target_pos
     except Exception:
         pass
 
-def status_loop():
-    while True:
-        print(f"[{CLIENT_ID}] Current position: {current_position}%")
-        time.sleep(5)
+# def status_loop():
+#     while True:
+#         print(f"[{CLIENT_ID}] Current position: {current_position}%")
+#         time.sleep(5)
 
 def ping_loop(sock):
     while True:
@@ -102,7 +101,7 @@ def run_actuator():
         time.sleep(0.5)
         sock.sendall(build_subscribe_packet(COMMAND_TOPIC))
 
-        threading.Thread(target=status_loop, daemon=True).start()
+        #threading.Thread(target=status_loop, daemon=True).start()
         threading.Thread(target=ping_loop, args=(sock,), daemon=True).start()
 
         while True:
@@ -127,7 +126,7 @@ def run_actuator():
                 process_command(message_bytes)
 
     except Exception as e:
-        print(f"Error: {e}")
+        logging.error(f"Error: {e}")
     finally:
         try:
             sock.close()
