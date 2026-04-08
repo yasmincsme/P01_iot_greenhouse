@@ -67,8 +67,10 @@ services:
     command: python3 iot_client.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.201.8"
-      BROKER_PORT: "9998"
-      DISPLAY: ":0"
+      BROKER_IP: "192.168.0.100"
+      BROKER_PORT: "9999"
+      DISPLAY: $DISPLAY
+      XAUTHORITY: /.Xauthority
     volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ~/.Xauthority:/.Xauthority:ro
