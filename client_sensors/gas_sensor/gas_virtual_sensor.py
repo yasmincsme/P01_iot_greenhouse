@@ -2,9 +2,10 @@ import socket
 import json
 import time
 import random
+import os
 
-BROKER_IP = "127.0.0.1"
-PORT = 1883
+BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
+PORT = int(os.environ.get("BROKER_PORT", "1883"))
 CLIENT_ID = "GAS_NODE_04"
 TOPIC = "greenhouse/gas"
 
@@ -58,7 +59,7 @@ def run_node():
         sock.sendall(conn_pkt)
         time.sleep(0.5)
         
-        print(f"[{CLIENT_ID}] Connected to Fransmitto Broker.")
+        print(f"[{CLIENT_ID}] Connected to Fransmitto Broker at {BROKER_IP}:{PORT}.")
 
         while True:
             gas_ppm = read_sensor_data()
@@ -75,9 +76,8 @@ def run_node():
             packet = build_mqtt_packet(3, TOPIC, data)
             sock.sendall(packet)
             
-            status = "!!! DANGER !!!" if is_danger else "NORMAL"
+            status = "DANGER" if is_danger else "NORMAL"
             print(f"[{CLIENT_ID}] Gas Level: {gas_ppm} PPM | Status: {status}")
-            print(f"DEBUG: Sent {len(packet)} raw bytes.")
             
             time.sleep(3)
             

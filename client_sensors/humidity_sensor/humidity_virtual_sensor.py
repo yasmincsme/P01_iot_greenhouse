@@ -2,9 +2,10 @@ import socket
 import json
 import time
 import random
+import os
 
-BROKER_IP = "127.0.0.1"
-PORT = 1883
+BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
+PORT = int(os.environ.get("BROKER_PORT", "1883"))
 CLIENT_ID = "HUMID_NODE_02"
 TOPIC = "greenhouse/humidity"
 
@@ -62,7 +63,7 @@ def run_node():
         sock.sendall(conn_pkt)
         time.sleep(0.5)
         
-        print(f"[{CLIENT_ID}] Successfully connected to Fransmitto.")
+        print(f"[{CLIENT_ID}] Successfully connected to Fransmitto at {BROKER_IP}:{PORT}.")
 
         while True:
             current_rh = read_sensor_data(current_rh)
@@ -77,7 +78,7 @@ def run_node():
             packet = build_mqtt_packet(3, TOPIC, data)
             sock.sendall(packet)
             
-            print(f"[{CLIENT_ID}] Humidity: {current_rh}% | Sent {len(packet)} bytes.")
+            print(f"[{CLIENT_ID}] Humidity: {current_rh}%")
             
             time.sleep(10)
             
