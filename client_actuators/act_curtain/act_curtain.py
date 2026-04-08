@@ -79,11 +79,6 @@ def process_command(raw_payload):
     except Exception:
         pass
 
-# def status_loop():
-#     while True:
-#         print(f"[{CLIENT_ID}] Current position: {current_position}%")
-#         time.sleep(5)
-
 def ping_loop(sock):
     while True:
         time.sleep(45)
@@ -100,8 +95,8 @@ def run_actuator():
         sock.sendall(build_connect_packet(CLIENT_ID))
         time.sleep(0.5)
         sock.sendall(build_subscribe_packet(COMMAND_TOPIC))
+        logging.warning(f"[{CLIENT_ID}] Successfully connected and listening on: {COMMAND_TOPIC}")
 
-        #threading.Thread(target=status_loop, daemon=True).start()
         threading.Thread(target=ping_loop, args=(sock,), daemon=True).start()
 
         while True:

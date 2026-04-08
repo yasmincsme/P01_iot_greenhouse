@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import os
+import logging
 
 BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
 PORT = int(os.environ.get("BROKER_PORT", "9998"))
@@ -69,11 +70,11 @@ def process_command(raw_payload):
         duration = data.get("duration_sec", 0)
         
         if duration > 0:
-            print(f"[{CLIENT_ID}] Valve open! Irrigating for {duration} seconds...")
+            logging.warning(f"[{CLIENT_ID}] Valve open! Irrigating for {duration} seconds...")
             time.sleep(duration)
-            print(f"[{CLIENT_ID}] Irrigation complete. Valve closed.")
+            logging.warning(f"[{CLIENT_ID}] Irrigation complete. Valve closed.")
     except Exception as e:
-        print(f"[{CLIENT_ID}] Failed to process command: {e}")
+        logging.warning(f"[{CLIENT_ID}] Failed to process command: {e}")
 
 def ping_loop(sock):
     while True:
@@ -91,7 +92,7 @@ def run_actuator():
         sock.sendall(build_connect_packet(CLIENT_ID))
         time.sleep(0.5)
         sock.sendall(build_subscribe_packet(COMMAND_TOPIC))
-        print(f"[{CLIENT_ID}] Successfully connected and listening on: {COMMAND_TOPIC}")
+        logging.warning(f"[{CLIENT_ID}] Successfully connected and listening on: {COMMAND_TOPIC}")
 
         threading.Thread(target=ping_loop, args=(sock,), daemon=True).start()
 
@@ -117,7 +118,7 @@ def run_actuator():
                 process_command(message_bytes)
 
     except Exception as e:
-        print(f"[{CLIENT_ID}] Runtime Error: {e}")
+        logging.warning(f"[{CLIENT_ID}] Runtime Error: {e}")
     finally:
         try:
             sock.close()
