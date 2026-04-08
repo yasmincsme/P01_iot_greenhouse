@@ -3,6 +3,7 @@ import json
 import time
 import random
 import os
+import logging
 
 BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
 PORT = int(os.environ.get("BROKER_PORT", "9998"))
@@ -53,7 +54,7 @@ def build_mqtt_packet(packet_type, topic, payload_dict):
 
 def run_node():
     current_temp = 25.0 
-    print(f"[{CLIENT_ID}] Initializing Temperature Monitoring Node...")
+    logging.warning(f"[{CLIENT_ID}] Starting Temperature Monitoring System...")
     
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -63,7 +64,7 @@ def run_node():
         sock.sendall(conn_pkt)
         time.sleep(0.5)
         
-        print(f"[{CLIENT_ID}] Successfully connected to Fransmitto at {BROKER_IP}:{PORT}.")
+        logging.warning(f"[{CLIENT_ID}] Connected to BROKER at {BROKER_IP}:{PORT}.")
 
         while True:
             current_temp = read_sensor_data(current_temp)
@@ -78,12 +79,12 @@ def run_node():
             packet = build_mqtt_packet(3, TOPIC, data)
             sock.sendall(packet)
             
-            print(f"[{CLIENT_ID}] Temperature: {current_temp} C")
+            logging.warning(f"[{CLIENT_ID}] Temperature: {current_temp} C")
             
             time.sleep(5)
             
     except Exception as e:
-        print(f"[{CLIENT_ID}] Connection Lost: {e}")
+        logging.warning(f"[{CLIENT_ID}] Connection Failed: {e}")
     finally:
         sock.close()
 

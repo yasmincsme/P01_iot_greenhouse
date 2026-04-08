@@ -3,6 +3,7 @@ import json
 import time
 import random
 import os
+import logging
 
 BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
 PORT = int(os.environ.get("BROKER_PORT", "9998"))
@@ -49,7 +50,7 @@ def build_mqtt_packet(packet_type, topic, payload_dict):
     return bytearray([header]) + rl_bytes + var_h_and_payload
 
 def run_node():
-    print(f"[{CLIENT_ID}] Starting Gas Monitoring System...")
+    logging.warning(f"[{CLIENT_ID}] Starting Gas Monitoring System...")
     
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -59,7 +60,7 @@ def run_node():
         sock.sendall(conn_pkt)
         time.sleep(0.5)
         
-        print(f"[{CLIENT_ID}] Connected to Fransmitto Broker at {BROKER_IP}:{PORT}.")
+        logging.warning(f"[{CLIENT_ID}] Connected to BROKER at {BROKER_IP}:{PORT}.")
 
         while True:
             gas_ppm = read_sensor_data()
@@ -77,12 +78,12 @@ def run_node():
             sock.sendall(packet)
             
             status = "DANGER" if is_danger else "NORMAL"
-            print(f"[{CLIENT_ID}] Gas Level: {gas_ppm} PPM | Status: {status}")
+            logging.warning(f"[{CLIENT_ID}] Gas Level: {gas_ppm} PPM | Status: {status}")
             
             time.sleep(3)
             
     except Exception as e:
-        print(f"[{CLIENT_ID}] Connection Failed: {e}")
+        logging.warning(f"[{CLIENT_ID}] Connection Failed: {e}")
     finally:
         sock.close()
 
