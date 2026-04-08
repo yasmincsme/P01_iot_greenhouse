@@ -7,7 +7,7 @@ import time
 import os
 import math
 
-BROKER_IP = os.environ.get("BROKER_IP", "172.16.201.16")
+BROKER_IP = os.environ.get("BROKER_IP", "127.0.0.1")
 PORT = int(os.environ.get("BROKER_PORT", "9998"))
 CLIENT_ID = "CLI_DASH_01"
 
