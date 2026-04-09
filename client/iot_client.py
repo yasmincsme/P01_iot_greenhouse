@@ -302,8 +302,13 @@ class GreenhouseDashboard(ctk.CTk):
         try:
             pkt = self._build_publish_packet(topic, payload)
             self.sock.sendall(pkt)
-        except: self.connected = False
-
+            
+            msg_str = json.dumps(payload)
+            self.after(0, lambda: self._log("out", f"[{topic}] {msg_str}"))
+            
+        except: 
+            self.connected = False
+    
     @staticmethod
     def _encode_remaining_length(length):
         encoded = bytearray()
