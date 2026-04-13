@@ -1,55 +1,99 @@
-# Sistema de Monitoramento Inteligente para Estufas
 
-Este projeto consiste num sistema de gestão inteligente para monitoramento de estufas de pequeno porte, focado na coleta de telemetria ambiental e controlo remoto de atuadores. O sistema utiliza uma arquitetura descentralizada baseada no protocolo **MQTT** sobre **TCP** para garantir a entrega de dados e o desacoplamento entre sensores e aplicações.
 
-## 🚀 Funcionalidades
+# 🌿 Smart Greenhouse Monitoring System
 
-* **Monitoramento em Tempo Real**: Coleta de dados de sensores virtuais de temperatura, humidade, luminosidade e concentração de gás (CO2).
-* **Controlo de Atuadores**: Interface para envio de comandos remotos para sistemas de irrigação e controladores de cortina.
-* **Inteligência Ambiental**: Uso de uma máquina de inferência (rede neural simples com funções ReLU e Sigmoid) para calcular o índice de qualidade ambiental (*Life Chance*).
-* **Dashboard Interativo**: Interface gráfica que permite visualizar os dados dos sensores e interagir com o painel de atuadores.
+> **Projeto da disciplina TEC502 - Concorrência e Conectividade (UEFS)** \> Implementação de uma infraestrutura IoT robusta para monitoramento e controle autônomo de estufas inteligentes, utilizando uma arquitetura baseada no protocolo MQTT sobre TCP/IP.
 
-## 🏗️ Arquitetura do Sistema
 
-O projeto fundamenta-se no modelo de **publicação-assinatura**:
 
-1. **Broker**: Software central responsável por coletar mensagens, gerir subscrições e encaminhar dados aos destinatários corretos.
-2. **Publishers (Sensores)**: Dispositivos virtuais que publicam dados em tópicos específicos, como `greenhouse/temp` ou `greenhouse/humidity`.
-3. **Subscribers (Atuadores/Dashboard)**: Consomem dados dos tópicos de sensores ou comandos de controlo.
 
-<figure>
-  <p align="center">
-    <img src="assets/diagrama.png" alt="Diagrama do Sistema" width="600">
-  </p>
-  <figcaption align="center"><b>Figura 1:</b> Relação entre nós da rede.</figcaption>
-</figure>
 
-## 🛠️ Tecnologias Utilizadas
+## 📑 Sumário
 
-* **Linguagem**: Python.
-* **Protocolo de Aplicação**: MQTT (implementação personalizada com suporte a pacotes binários como CONNECT, PUBLISH, SUBSCRIBE, PINGREQ, etc.).
-* **Protocolo de Transporte**: TCP.
-* **Formatos de Dados**: JSON para os payloads das mensagens.
-* **Bibliotecas**: Tkinter (para a interface gráfica).
+  - [Sobre o Projeto](https://www.google.com/search?q=%23-sobre-o-projeto)
+  - [Arquitetura e Componentes](https://www.google.com/search?q=%23-arquitetura-e-componentes)
+  - [Protocolo e Comunicação](https://www.google.com/search?q=%23-protocolo-e-comunica%C3%A7%C3%A3o)
+  - [Como Executar](https://www.google.com/search?q=%23-como-executar)
+  - [Funcionalidades de Concorrência e Conectividade](https://www.google.com/search?q=%23-funcionalidades-de-concorr%C3%AAncia-e-conectividade)
 
-## 🔧 Decisões de Projeto
 
-* **Leveza**: O protocolo MQTT foi escolhido pelo seu baixo *overhead* (cabeçalho fixo de apenas 2 bytes), ideal para redes com recursos limitados.
-* **Confiabilidade**: Adoção do TCP para garantir o controlo de erros fim a fim.
-* **Simplicidade**: Nesta fase de PoC, priorizou-se a agilidade, suprimindo temporariamente mecanismos complexos de autenticação e criptografia.
 
-<figure>
-  <p align="center">
-    <img src="assets/mensagem.png" alt="Diagrama do Sistema" width="600">
-  </p>
-  <figcaption align="center"><b>Figura 2:</b> Formato da Unidade de Dados do Protocolo.</figcaption>
-</figure>
+## 📖 Sobre o Projeto
 
-## 💻 Como Executar 
+O **Smart Greenhouse** é um sistema distribuído projetado para resolver problemas de monitoramento de microclima e automação agrícola. O núcleo do projeto é um **Broker MQTT customizado** que permite o desacoplamento total entre sensores e atuadores, garantindo escalabilidade e resiliência através de comunicação baseada em eventos.
 
-1.  Inicie o **Broker** para permitir a comunicação.
-2.  Execute os **Sensores** (Publishers) para começar a enviar telemetria.
-3.  Inicie o **Dashboard** para monitorar os dados e controlar os **Atuadores**.
 
----
-*Este projeto foi desenvolvido como parte da disciplina TEC502-MI Concorrência e Conectividade na Universidade Estadual de Feira de Santana (UEFS)*.
+## 🏗 Arquitetura e Componentes
+
+O sistema é dividido em três pilares fundamentais, todos gerenciados via **Docker**:
+
+### 1\. 🖥️ Broker (Serviço de Integração)
+
+Localizado no diretório `/broker`.
+
+  - **Papel:** Gerenciar conexões, processar o *handshake*, validar mensagens e realizar o roteamento dinâmico via tópicos.
+  - **Tecnologia:** Python Nativo (Sockets e Threading).
+
+### 2\. 📟 Dispositivos de Borda (Edge)
+
+Simuladores de hardware localizados em `/client_sensors` e `/client_actuators`.
+
+  - **Sensores:** Publicam telemetria (Temperatura, Umidade, Luminosidade e Gás) periodicamente.
+  - **Atuadores:** Assinam tópicos de comando e executam ações (Irritação e Cortina).
+
+### 3\. 📊 Dashboard (Aplicação Cliente)
+
+Localizado em `/client`.
+
+  - **Papel:** Interface gráfica (IHM) para monitoramento em tempo real e envio de comandos críticos.
+  - **Tecnologia:** Python com biblioteca `Tkinter`.
+
+
+## 📡 Protocolo e Comunicação
+
+O sistema utiliza uma Unidade de Dados de Protocolo (PDU) binária otimizada:
+
+  - **Encapsulamento:** Cabeçalhos binários seguidos de Payloads estruturados em **JSON**.
+  - **Handshake:** Fluxo rigoroso de `CONNECT` e `CONNACK`.
+  - **QoS:** Suporte resiliente aos níveis 0, 1 e 2 (com degradação graciosa).
+
+
+
+
+
+## 🚀 Como Executar
+
+A solução está totalmente "dockerizada" para facilitar a avaliação.
+
+### Pré-requisitos
+
+  - Docker instalado.
+  - Docker Compose instalado.
+
+### Passo a Passo
+
+1.  Clone este repositório.
+2.  No terminal, dentro da pasta raiz, execute:
+    ```bash
+    docker-compose up --build
+    ```
+3.  O Broker será iniciado na porta `9998` e os containers dos sensores e atuadores se conectarão automaticamente.
+
+
+## ⚙️ Funcionalidades de Concorrência e Conectividade
+
+Como requisito da disciplina **TEC502**, o projeto implementa conceitos avançados:
+
+  * **Multithreading:** O Broker aloca uma thread independente para cada cliente, permitindo o processamento paralelo de dados de múltiplos sensores.
+  * **Controle de Concorrência (Mutex):** Uso de `threading.Lock()` para garantir a atomicidade ao acessar as tabelas de roteamento globais.
+  * **Keep-Alive:** Mecanismo de vigilância que detecta inatividade de sockets e limpa recursos do sistema.
+  * **Last Will and Testament (LWT):** Mensagem de "testamento" disparada automaticamente pelo Broker caso um sensor sofra uma queda abrupta de energia/conexão.
+  * **Resiliência TCP:** Tratamento de exceções como *Broken Pipe* e *Connection Reset* para evitar o crash do serviço de integração.
+
+-----
+
+### 👥 Autor
+
+  - **Yasmin Cordeiro de Souza Meira** - [GitHub](https://www.google.com/search?q=https://github.com/SeuUsuarioAqui)
+  - Projeto desenvolvido para a Universidade Estadual de Feira de Santana (UEFS).
+
