@@ -1,21 +1,17 @@
-
-
 # 🌿 Smart Greenhouse Monitoring System
 
 > **Projeto da disciplina TEC502 - Concorrência e Conectividade (UEFS)** \> Implementação de uma infraestrutura IoT robusta para monitoramento e controle autônomo de estufas inteligentes, utilizando uma arquitetura baseada no protocolo MQTT sobre TCP/IP.
-
-
-
 
 
 ## 📑 Sumário
 
   - [Sobre o Projeto](https://www.google.com/search?q=%23-sobre-o-projeto)
   - [Arquitetura e Componentes](https://www.google.com/search?q=%23-arquitetura-e-componentes)
-  - [Protocolo e Comunicação](https://www.google.com/search?q=%23-protocolo-e-comunica%C3%A7%C3%A3o)
+  - [Estrutura de Diretórios](https://www.google.com/search?q=%23-estrutura-de-diret%C3%B3rios)
+  - [Pacotes e Dependências](https://www.google.com/search?q=%23-pacotes-e-depend%C3%AAncias)
+  - [Dockerization](https://www.google.com/search?q=%23-dockerization)
   - [Como Executar](https://www.google.com/search?q=%23-como-executar)
-  - [Funcionalidades de Concorrência e Conectividade](https://www.google.com/search?q=%23-funcionalidades-de-concorr%C3%AAncia-e-conectividade)
-
+  - [Como Usar](https://www.google.com/search?q=%23-como-usar)
 
 
 ## 📖 Sobre o Projeto
@@ -27,73 +23,106 @@ O **Smart Greenhouse** é um sistema distribuído projetado para resolver proble
 
 O sistema é dividido em três pilares fundamentais, todos gerenciados via **Docker**:
 
-### 1\. 🖥️ Broker (Serviço de Integração)
-
-Localizado no diretório `/broker`.
-
-  - **Papel:** Gerenciar conexões, processar o *handshake*, validar mensagens e realizar o roteamento dinâmico via tópicos.
-  - **Tecnologia:** Python Nativo (Sockets e Threading).
-
-### 2\. 📟 Dispositivos de Borda (Edge)
-
-Simuladores de hardware localizados em `/client_sensors` e `/client_actuators`.
-
-  - **Sensores:** Publicam telemetria (Temperatura, Umidade, Luminosidade e Gás) periodicamente.
-  - **Atuadores:** Assinam tópicos de comando e executam ações (Irritação e Cortina).
-
-### 3\. 📊 Dashboard (Aplicação Cliente)
-
-Localizado em `/client`.
-
-  - **Papel:** Interface gráfica (IHM) para monitoramento em tempo real e envio de comandos críticos.
-  - **Tecnologia:** Python com biblioteca `Tkinter`.
+1.  **🖥️ Broker (Serviço de Integração):** O "cérebro" do sistema que gerencia conexões e roteia mensagens.
+2.  **📟 Dispositivos de Borda (Edge):** Simuladores de sensores (Temp, Umidade, Luz, Gás) e atuadores (Irrigação, Cortina).
+3.  **📊 Dashboard (Aplicação Cliente):** Interface gráfica (IHM) para monitoramento e envio de comandos.
 
 
-## 📡 Protocolo e Comunicação
+## 📂 Estrutura de Diretórios
 
-O sistema utiliza uma Unidade de Dados de Protocolo (PDU) binária otimizada:
+O projeto está organizado de forma modular para facilitar a manutenção e a conteinerização individual:
 
-  - **Encapsulamento:** Cabeçalhos binários seguidos de Payloads estruturados em **JSON**.
-  - **Handshake:** Fluxo rigoroso de `CONNECT` e `CONNACK`.
-  - **QoS:** Suporte resiliente aos níveis 0, 1 e 2 (com degradação graciosa).
+```text
+P01_iot_greenhouse/
+├── broker/                 # Código fonte do Broker MQTT
+│   ├── iot_broker.py       # Script principal do servidor
+│   ├── aux.py              # Funções auxiliares de codificação
+│   └── Dockerfile          # Configuração da imagem do Broker
+├── client/                 # Aplicação Dashboard (IHM)
+│   ├── iot_client.py       # Interface gráfica e lógica de rede
+│   └── Dockerfile          # Configuração da imagem do Cliente
+├── client_sensors/         # Simuladores de sensores
+│   ├── humidity_sensor/
+│   ├── temperature_sensor/
+│   ├── gas_sensor/
+│   └── light_sensor/       # Cada sensor possui seu script e Dockerfile
+├── client_actuators/       # Simuladores de atuadores
+│   ├── act_irrigation/
+│   └── act_curtain/        # Cada atuador possui seu script e Dockerfile
+├── assets/                 # Imagens e recursos do README
+└── docker-compose.yml      # Arquivo de orquestração global
+```
 
 
 
+## 📦 Pacotes e Dependências
+
+Para garantir a leveza e a portabilidade, o projeto utiliza exclusivamente bibliotecas nativas do **Python 3.12**, eliminando a necessidade de gerenciadores de pacotes externos em ambientes restritos:
+
+  - `socket`: Comunicação TCP de baixo nível.
+  - `threading`: Gerenciamento de múltiplas conexões simultâneas (concorrência).
+  - `json`: Formatação e parsing de mensagens de telemetria.
+  - `tkinter`: Utilizada no Dashboard para a interface gráfica (requer `python3-tk` no Linux).
+  - `os`, `time`, `random`: Utilitários de sistema, tempo e simulação de dados.
+
+
+
+## 🐳 Dockerization
+
+Cada componente possui um **Dockerfile** otimizado baseado em `python:3.12-slim`. A configuração padrão segue este modelo:
+
+```dockerfile
+# Imagem base leve
+FROM python:3.12-slim
+
+# Variáveis de ambiente para logs em tempo real
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY . .
+
+# Exposição da porta (no caso do Broker)
+EXPOSE 9998
+
+# Comando de execução
+CMD ["python", "script_principal.py"]
+```
+
+O arquivo `docker-compose.yml` orquestra o ecossistema, definindo variáveis de ambiente como `BROKER_IP` para que os sensores encontrem o serviço de integração automaticamente.
 
 
 ## 🚀 Como Executar
 
-A solução está totalmente "dockerizada" para facilitar a avaliação.
+### 1\. Via Docker (Recomendado para Avaliação)
 
-### Pré-requisitos
+Certifique-se de ter o Docker e Docker Compose instalados e execute:
 
-  - Docker instalado.
-  - Docker Compose instalado.
+```bash
+docker-compose up --build
+```
 
-### Passo a Passo
+Isso compilará todas as imagens e iniciará o broker, 4 sensores, 2 atuadores e o dashboard simultaneamente.
 
-1.  Clone este repositório.
-2.  No terminal, dentro da pasta raiz, execute:
-    ```bash
-    docker-compose up --build
-    ```
-3.  O Broker será iniciado na porta `9998` e os containers dos sensores e atuadores se conectarão automaticamente.
+### 2\. Execução Manual
+
+Se preferir executar localmente:
+
+1.  Inicie o broker: `python broker/iot_broker.py`
+2.  Inicie o dashboard: `python client/iot_client.py`
+3.  Inicie os sensores/atuadores desejados.
 
 
-## ⚙️ Funcionalidades de Concorrência e Conectividade
+## 🕹️ Como Usar
 
-Como requisito da disciplina **TEC502**, o projeto implementa conceitos avançados:
-
-  * **Multithreading:** O Broker aloca uma thread independente para cada cliente, permitindo o processamento paralelo de dados de múltiplos sensores.
-  * **Controle de Concorrência (Mutex):** Uso de `threading.Lock()` para garantir a atomicidade ao acessar as tabelas de roteamento globais.
-  * **Keep-Alive:** Mecanismo de vigilância que detecta inatividade de sockets e limpa recursos do sistema.
-  * **Last Will and Testament (LWT):** Mensagem de "testamento" disparada automaticamente pelo Broker caso um sensor sofra uma queda abrupta de energia/conexão.
-  * **Resiliência TCP:** Tratamento de exceções como *Broken Pipe* e *Connection Reset* para evitar o crash do serviço de integração.
+1.  **Handshake Inicial:** Ao iniciar, o Broker aguarda conexões. O Dashboard e os sensores realizam o `CONNECT` automaticamente.
+2.  **Monitoramento:** Verifique os logs do Docker ou a interface do Dashboard para ver os valores de Humidade e Temperatura variando em tempo real.
+3.  **Comandos:** No Dashboard, clique nos botões de controle para enviar comandos (ex: "Abrir Cortina"). O comando será encapsulado em um pacote `PUBLISH` e enviado ao atuador via Broker.
+4.  **Teste de Falhas:** Interrompa um container de sensor (`docker stop <nome>`). O Broker detectará a falha via `Keep-Alive` e disparará o `Last Will` (LWT) para o Dashboard.
 
 -----
 
-### 👥 Autor
+### 👥 Desenvolvedor
 
-  - **Yasmin Cordeiro de Souza Meira** - [GitHub](https://www.google.com/search?q=https://github.com/SeuUsuarioAqui)
-  - Projeto desenvolvido para a Universidade Estadual de Feira de Santana (UEFS).
+  - **Yasmin Cordeiro de Souza Meira**
+  - Disciplina: **TEC502 - Concorrência e Conectividade** (UEFS)
 
