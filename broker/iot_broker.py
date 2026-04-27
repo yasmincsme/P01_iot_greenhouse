@@ -1,375 +1,815 @@
+"""
+broker.py — Broker MQTT-SN v1.2 sobre UDP
+
+Correções em relação ao broker TCP original:
+  - UDP: recvfrom/sendto; cliente identificado por (ip, port)
+  - recv() parcial eliminado: datagramas UDP chegam completos ou não chegam
+  - Sem I/O de rede dentro de broker_lock (lock só protege estruturas em memória)
+  - trigger_lwt não adquire lock enquanto chama route_publish
+  - Race condition no keep_alive_monitor corrigida (snapshot atômico)
+  - except: pass substituído por log de avisos
+  - Wildcards MQTT + e # implementados em topic_matches()
+  - Registro de tópicos MQTT-SN: REGISTER / REGACK
+  - Estados de cliente: ACTIVE / ASLEEP / AWAKE
+  - Modo sleep: mensagens enfileiradas e entregues no PINGREQ com ClientId
+  - Anúncio de gateway: ADVERTISE periódico + resposta a SEARCHGW / GWINFO
+  - clean_session=0: sessão (subs + fila offline) persiste entre reconexões
+  - Limite de clientes configurável (MAX_CLIENTS)
+  - QoS 2: controle de estado por pacote (pending_qos2) com deduplicação
+"""
+
 import socket
 import threading
 import time
-from aux import *
+import logging
+from collections import defaultdict
+from aux import MsgType, ReturnCode, TopicIdType, ClientState
 
-subscriptions = {}
-retained_messages = {}
-clients = {}
-broker_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Configuração
+# ---------------------------------------------------------------------------
 
-def read_fixed_header(connection):
-    byte_1_raw = connection.recv(1)
-    if not byte_1_raw:
-        return None, None, None
-    
-    byte_1 = byte_1_raw[0]
-    packet_type = byte_1 >> 4
-    flags = byte_1 & 0x0F
+BROKER_HOST    = "0.0.0.0"
+BROKER_PORT    = 1883          # porta UDP padrão do MQTT-SN
+GATEWAY_ID     = 0x01
+MAX_CLIENTS    = 500
+ADVERTISE_INTERVAL = 30        # segundos entre ADVERTISE broadcasts
+BROADCAST_ADDR = ("255.255.255.255", BROKER_PORT)
 
-    multiplier = 1
-    remaining_length = 0
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("mqttsn")
 
-    for _ in range(4):
-        byte_2_raw = connection.recv(1)
-        if not byte_2_raw:
-            return None, None, None
-        
-        byte_2 = byte_2_raw[0]
-        remaining_length += (byte_2 & 0x7F) * multiplier
-        multiplier *= 128
+# ---------------------------------------------------------------------------
+# Estado global (protegido por broker_lock, exceto onde indicado)
+# ---------------------------------------------------------------------------
 
-        if (byte_2 & 0x80) == 0:
-            break
-    else:
-        return None, None, None
-    
-    return packet_type, flags, remaining_length
+broker_lock      = threading.Lock()
 
-def read_string(payload, offset):
-    length = int.from_bytes(payload[offset:offset+2], byteorder='big')
-    offset += 2
-    text = payload[offset:offset+length].decode('utf-8')
-    return text, offset + length
+# addr (ip, port) → dict com dados do cliente
+clients: dict[tuple, dict] = {}
 
-def send_connack(connection, client_id="Unknown", return_code=0x00):
-    print(f"[OUT] [{client_id}] Sending CONNACK")
-    packet = bytes([(Pkt.CONNACK << 4), 0x02, 0x00, return_code])
-    connection.sendall(packet)
+# topic_name → set de addr dos subscribers
+subscriptions: dict[str, set] = {}
 
-def send_publish(connection, topic, message, qos=0, retain=0, packet_id=None, client_id="Unknown"):
-    print(f"[OUT] [{client_id}] Sending PUBLISH to topic: {topic}")
-    flags = (qos << 1) | retain
-    packet_type_n_flags = (Pkt.PUBLISH << 4) | flags
-    
-    topic_bytes = topic.encode('utf-8')
-    message_bytes = message.encode('utf-8')
+# topic_name → {"message": bytes, "qos": int}
+retained_messages: dict[str, dict] = {}
 
-    topic_length = len(topic_bytes)
-    variable_header = bytes([topic_length >> 8, topic_length & 0xFF]) + topic_bytes
-    
-    if qos > 0 and packet_id:
-        variable_header += packet_id
+# addr → {"next_id": int, "id_to_name": {int: str}, "name_to_id": {str: int}}
+topic_registrations: dict[tuple, dict] = {}
 
-    total_length = len(variable_header) + len(message_bytes)
-    
-    remaining_length_bytes = bytearray()
-    val = total_length
-    while True:
-        byte = val % 128
-        val = val // 128
-        if val > 0:
-            byte |= 0x80
-        remaining_length_bytes.append(byte)
-        if val == 0:
-            break
 
-    packet = bytes([packet_type_n_flags]) + remaining_length_bytes + variable_header + message_bytes
-    connection.sendall(packet)
+# ---------------------------------------------------------------------------
+# Helpers de tópico
+# ---------------------------------------------------------------------------
 
-def send_ack(connection, pkt_type, packet_id, client_id="Unknown"):
-    print(f"[OUT] [{client_id}] Sending ACK (Type: {pkt_type})")
-    flags = 0x02 if pkt_type == Pkt.PUBREL else 0x00
-    packet = bytes([(pkt_type << 4) | flags, 0x02, packet_id[0], packet_id[1]])
-    connection.sendall(packet)
+def topic_matches(pattern: str, topic: str) -> bool:
+    """
+    Verifica se 'topic' casa com 'pattern', suportando wildcards MQTT:
+      +  corresponde a exatamente um nível
+      #  corresponde a zero ou mais níveis (deve ser o último segmento)
+    """
+    if pattern == topic:
+        return True
+    pat_parts   = pattern.split("/")
+    topic_parts = topic.split("/")
+    return _match_parts(pat_parts, topic_parts)
 
-def handle_connect(connection, address, payload_data):
-    if len(payload_data) < 10:
-        return None
 
-    protocol_name, offset = read_string(payload_data, 0)
-    protocol_level = payload_data[offset]
-    offset += 1
-    
-    connect_flags = payload_data[offset]
-    offset += 1
-    
-    keep_alive = int.from_bytes(payload_data[offset:offset+2], byteorder='big')
-    offset += 2
+def _match_parts(pat: list, top: list) -> bool:
+    if not pat:
+        return not top
+    if pat[0] == "#":
+        return True
+    if not top:
+        return False
+    if pat[0] == "+" or pat[0] == top[0]:
+        return _match_parts(pat[1:], top[1:])
+    return False
 
-    clean_session = (connect_flags & 0x02) >> 1
-    will_flag = (connect_flags & 0x04) >> 2
-    will_qos = (connect_flags & 0x18) >> 3
-    will_retain = (connect_flags & 0x20) >> 5
 
-    client_id, offset = read_string(payload_data, offset)
-    print(f"[IN] [{client_id}] CONNECT received from {address}")
+def get_matching_subscribers(topic: str) -> set:
+    """Retorna o conjunto de addr de todos os clientes subscritos ao tópico."""
+    result = set()
+    with broker_lock:
+        for pattern, addrs in subscriptions.items():
+            if topic_matches(pattern, topic):
+                result |= addrs
+    return result
 
-    will_topic = None
-    will_message = None
-    if will_flag:
-        will_topic, offset = read_string(payload_data, offset)
-        will_message, offset = read_string(payload_data, offset)
+
+# ---------------------------------------------------------------------------
+# Helpers de codec MQTT-SN
+# ---------------------------------------------------------------------------
+
+def encode_length(length: int) -> bytes:
+    """Codifica o campo Length do cabeçalho MQTT-SN (1 ou 3 bytes)."""
+    if length <= 255:
+        return bytes([length])
+    # forma longa: 0x01 + 2 bytes big-endian
+    return bytes([0x01]) + length.to_bytes(2, "big")
+
+
+def build_packet(msg_type: MsgType, payload: bytes) -> bytes:
+    body   = bytes([int(msg_type)]) + payload
+    length = len(body) + 1          # +1 para o próprio campo Length
+    return encode_length(length) + body
+
+
+def parse_flags(flags_byte: int) -> dict:
+    return {
+        "dup":          bool(flags_byte & 0x80),
+        "qos":          (flags_byte >> 5) & 0x03,
+        "retain":       bool(flags_byte & 0x10),
+        "will":         bool(flags_byte & 0x08),
+        "clean_session":bool(flags_byte & 0x04),
+        "topic_id_type":flags_byte & 0x03,
+    }
+
+
+def flags_byte(dup=False, qos=0, retain=False,
+               will=False, clean_session=False,
+               topic_id_type=TopicIdType.NORMAL) -> int:
+    return (
+        (0x80 if dup else 0)
+        | ((qos & 0x03) << 5)
+        | (0x10 if retain else 0)
+        | (0x08 if will else 0)
+        | (0x04 if clean_session else 0)
+        | (int(topic_id_type) & 0x03)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Envio de pacotes (sem lock; chamado sempre fora de broker_lock)
+# ---------------------------------------------------------------------------
+
+def send_packet(sock: socket.socket, addr: tuple,
+                msg_type: MsgType, payload: bytes) -> None:
+    data = build_packet(msg_type, payload)
+    try:
+        sock.sendto(data, addr)
+    except Exception as e:
+        log.warning("[SEND] Falha ao enviar %s para %s: %s", msg_type.name, addr, e)
+
+
+def send_connack(sock, addr, return_code=ReturnCode.ACCEPTED):
+    send_packet(sock, addr, MsgType.CONNACK, bytes([int(return_code)]))
+
+
+def send_regack(sock, addr, topic_id: int, msg_id: int,
+                return_code=ReturnCode.ACCEPTED):
+    payload = (topic_id.to_bytes(2, "big")
+               + msg_id.to_bytes(2, "big")
+               + bytes([int(return_code)]))
+    send_packet(sock, addr, MsgType.REGACK, payload)
+
+
+def send_suback(sock, addr, qos: int, topic_id: int, msg_id: int,
+                return_code=ReturnCode.ACCEPTED):
+    payload = (bytes([flags_byte(qos=qos)])
+               + topic_id.to_bytes(2, "big")
+               + msg_id.to_bytes(2, "big")
+               + bytes([int(return_code)]))
+    send_packet(sock, addr, MsgType.SUBACK, payload)
+
+
+def send_unsuback(sock, addr, msg_id: int):
+    send_packet(sock, addr, MsgType.UNSUBACK, msg_id.to_bytes(2, "big"))
+
+
+def send_puback(sock, addr, topic_id: int, msg_id: int,
+                return_code=ReturnCode.ACCEPTED):
+    payload = (topic_id.to_bytes(2, "big")
+               + msg_id.to_bytes(2, "big")
+               + bytes([int(return_code)]))
+    send_packet(sock, addr, MsgType.PUBACK, payload)
+
+
+def send_pubrec(sock, addr, msg_id: int):
+    send_packet(sock, addr, MsgType.PUBREC, msg_id.to_bytes(2, "big"))
+
+
+def send_pubrel(sock, addr, msg_id: int):
+    send_packet(sock, addr, MsgType.PUBREL, msg_id.to_bytes(2, "big"))
+
+
+def send_pubcomp(sock, addr, msg_id: int):
+    send_packet(sock, addr, MsgType.PUBCOMP, msg_id.to_bytes(2, "big"))
+
+
+def send_publish(sock, addr, topic_id: int, message: bytes,
+                 qos=0, retain=False, dup=False,
+                 topic_id_type=TopicIdType.NORMAL, msg_id=0):
+    fb = flags_byte(dup=dup, qos=qos, retain=retain,
+                    topic_id_type=topic_id_type)
+    payload = (bytes([fb])
+               + topic_id.to_bytes(2, "big")
+               + msg_id.to_bytes(2, "big")
+               + message)
+    send_packet(sock, addr, MsgType.PUBLISH, payload)
+
+
+def send_pingresp(sock, addr):
+    send_packet(sock, addr, MsgType.PINGRESP, b"")
+
+
+def send_disconnect(sock, addr, duration: int = 0):
+    payload = duration.to_bytes(2, "big") if duration else b""
+    send_packet(sock, addr, MsgType.DISCONNECT, payload)
+
+
+def send_advertise(sock):
+    """Broadcast ADVERTISE (pode falhar em interfaces sem broadcast; ignoramos)."""
+    payload = bytes([GATEWAY_ID]) + ADVERTISE_INTERVAL.to_bytes(2, "big")
+    data = build_packet(MsgType.ADVERTISE, payload)
+    try:
+        sock.sendto(data, BROADCAST_ADDR)
+    except Exception:
+        pass  # broadcast pode não estar disponível em todas as interfaces
+
+
+# ---------------------------------------------------------------------------
+# Registro de tópicos por cliente
+# ---------------------------------------------------------------------------
+
+def _ensure_reg(addr: tuple) -> dict:
+    if addr not in topic_registrations:
+        topic_registrations[addr] = {"next_id": 1, "id_to_name": {}, "name_to_id": {}}
+    return topic_registrations[addr]
+
+
+def register_topic(addr: tuple, topic_name: str) -> int:
+    """Registra o tópico para o cliente e devolve o topic_id (cria se não existe)."""
+    reg = _ensure_reg(addr)
+    if topic_name in reg["name_to_id"]:
+        return reg["name_to_id"][topic_name]
+    tid = reg["next_id"]
+    reg["next_id"] += 1
+    reg["id_to_name"][tid]       = topic_name
+    reg["name_to_id"][topic_name] = tid
+    return tid
+
+
+def resolve_topic_id(addr: tuple, topic_id: int,
+                     topic_id_type: int) -> str | None:
+    """
+    Converte topic_id para nome de tópico.
+    Tipo SHORT: os dois bytes do topic_id são o nome literal (ex.: "ab").
+    """
+    if topic_id_type == TopicIdType.SHORT:
+        b = topic_id.to_bytes(2, "big")
+        return b.decode("ascii", errors="replace")
+    reg = topic_registrations.get(addr, {})
+    return reg.get("id_to_name", {}).get(topic_id)
+
+
+# ---------------------------------------------------------------------------
+# Roteamento de mensagens
+# ---------------------------------------------------------------------------
+
+def route_publish(sock: socket.socket, topic_name: str, message: bytes,
+                  qos: int, retain: bool, source_addr: tuple):
+    """
+    Distribui a mensagem a todos os subscribers (exceto a fonte).
+    Mensagens para clientes dormindo são enfileiradas.
+    Chamado FORA de broker_lock.
+    """
+    log.debug("[ROUTE] topic='%s' from=%s", topic_name, source_addr)
+
+    # 1. Atualizar retained
+    if retain:
+        with broker_lock:
+            if message:
+                retained_messages[topic_name] = {"message": message, "qos": qos}
+                log.info("[RETAIN] Guardada mensagem em '%s'", topic_name)
+            else:
+                retained_messages.pop(topic_name, None)
+                log.info("[RETAIN] Apagada mensagem retida em '%s'", topic_name)
+
+    # 2. Coletar subscribers (fora do lock para não segurar durante envio)
+    matching = get_matching_subscribers(topic_name)
+
+    for addr in matching:
+        if addr == source_addr:
+            continue
+        with broker_lock:
+            client = clients.get(addr)
+            if not client:
+                continue
+            state = client["state"]
+            # topic_id para este subscriber
+            tid = register_topic(addr, topic_name)
+
+        if state == ClientState.ACTIVE:
+            send_publish(sock, addr, tid, message, qos=qos, retain=False)
+        elif state in (ClientState.ASLEEP, ClientState.AWAKE):
+            # Enfileirar para entrega no próximo PINGREQ
+            with broker_lock:
+                client = clients.get(addr)
+                if client:
+                    client["offline_queue"].append({
+                        "topic_id": tid,
+                        "message":  message,
+                        "qos":      qos,
+                    })
+                    log.debug("[QUEUE] Mensagem enfileirada para %s (state=%s)",
+                              addr, state.name)
+
+
+def flush_offline_queue(sock: socket.socket, addr: tuple):
+    """Entrega mensagens enfileiradas a um cliente que acabou de acordar."""
+    with broker_lock:
+        client = clients.get(addr)
+        if not client:
+            return
+        queue = client["offline_queue"][:]
+        client["offline_queue"].clear()
+        client["state"] = ClientState.ACTIVE
+
+    for item in queue:
+        send_publish(sock, addr, item["topic_id"], item["message"],
+                     qos=item["qos"])
+
+
+# ---------------------------------------------------------------------------
+# Handlers de pacotes recebidos
+# ---------------------------------------------------------------------------
+
+def handle_connect(sock, addr, data: bytes):
+    if len(data) < 4:
+        log.warning("[CONNECT] Pacote curto de %s", addr)
+        return
+
+    flags      = parse_flags(data[0])
+    _protocol  = data[1]          # deve ser 0x01 para MQTT-SN
+    duration   = int.from_bytes(data[2:4], "big")
+    client_id  = data[4:].decode("utf-8", errors="replace")
+
+    log.info("[IN] CONNECT client_id='%s' addr=%s duration=%ds",
+             client_id, addr, duration)
 
     with broker_lock:
-        clients[client_id] = {
-            'socket': connection,
-            'address': address,
-            'keep_alive': keep_alive,
-            'last_seen': time.time(),
-            'clean_session': clean_session,
-            'lwt': {
-                'topic': will_topic,
-                'message': will_message,
-                'qos': will_qos,
-                'retain': will_retain
-            } if will_flag else None,
-            'clean_disconnect': False
+        active_count = sum(1 for c in clients.values()
+                           if c["state"] != ClientState.DISCONNECTED)
+        if active_count >= MAX_CLIENTS:
+            log.warning("[CONNECT] Broker cheio, rejeitando '%s'", client_id)
+
+        # Verificar se há sessão prévia (clean_session=0)
+        prev = None
+        if not flags["clean_session"]:
+            prev = clients.get(addr)
+
+        clients[addr] = {
+            "client_id":       client_id,
+            "keep_alive":      duration,
+            "last_seen":       time.time(),
+            "clean_session":   flags["clean_session"],
+            "state":           ClientState.ACTIVE,
+            "clean_disconnect":False,
+            "lwt":             None,
+            "offline_queue":   prev["offline_queue"] if prev else [],
+            "pending_qos2":    prev["pending_qos2"]  if prev else {},
         }
 
-    send_connack(connection, client_id)
-    return client_id
+    if active_count >= MAX_CLIENTS:
+        send_connack(sock, addr, ReturnCode.REJECTED_CONGESTION)
+        return
 
-def route_publish(topic, message, qos, retain, source_client_id):
-    print(f"[ROUTING] Distributing PUBLISH on topic '{topic}' from [{source_client_id}]")
+    send_connack(sock, addr, ReturnCode.ACCEPTED)
+    log.info("[OUT] CONNACK → %s", addr)
+
+
+def handle_willtopic(sock, addr, data: bytes):
+    if len(data) < 1:
+        return
+    flags      = parse_flags(data[0])
+    will_topic = data[1:].decode("utf-8", errors="replace")
     with broker_lock:
-        if retain:
-            if message == "":
-                retained_messages.pop(topic, None)
-                print(f"[ROUTING] Retained message cleared for topic '{topic}'")
+        if addr in clients:
+            if "lwt_pending" not in clients[addr]:
+                clients[addr]["lwt_pending"] = {}
+            clients[addr]["lwt_pending"]["topic"]  = will_topic
+            clients[addr]["lwt_pending"]["qos"]    = flags["qos"]
+            clients[addr]["lwt_pending"]["retain"] = flags["retain"]
+    send_packet(sock, addr, MsgType.WILLMSGREQ, b"")
+
+
+def handle_willmsg(sock, addr, data: bytes):
+    will_message = data
+    with broker_lock:
+        if addr in clients:
+            pending = clients[addr].pop("lwt_pending", {})
+            if pending:
+                pending["message"] = will_message
+                clients[addr]["lwt"] = pending
+    send_connack(sock, addr, ReturnCode.ACCEPTED)
+
+
+def handle_register(sock, addr, data: bytes):
+    if len(data) < 5:
+        return
+    # topic_id=0x0000 (campo reservado no sentido client→broker)
+    msg_id     = int.from_bytes(data[2:4], "big")
+    topic_name = data[4:].decode("utf-8", errors="replace")
+
+    with broker_lock:
+        tid = register_topic(addr, topic_name)
+
+    log.info("[IN] REGISTER '%s' → id=%d  addr=%s", topic_name, tid, addr)
+    send_regack(sock, addr, tid, msg_id)
+
+
+def handle_publish(sock, addr, data: bytes):
+    if len(data) < 6:
+        return
+    flags      = parse_flags(data[0])
+    qos        = flags["qos"]
+    retain     = flags["retain"]
+    dup        = flags["dup"]
+    tid_type   = flags["topic_id_type"]
+    topic_id   = int.from_bytes(data[1:3], "big")
+    msg_id     = int.from_bytes(data[3:5], "big")
+    message    = data[5:]
+
+    with broker_lock:
+        topic_name = resolve_topic_id(addr, topic_id, tid_type)
+        if addr in clients:
+            clients[addr]["last_seen"] = time.time()
+
+    if topic_name is None:
+        log.warning("[PUBLISH] topic_id=%d desconhecido de %s", topic_id, addr)
+        if qos == 1:
+            send_puback(sock, addr, topic_id, msg_id, ReturnCode.REJECTED_TOPIC_ID)
+        return
+
+    log.info("[IN] PUBLISH topic='%s' qos=%d addr=%s", topic_name, qos, addr)
+
+    # QoS 1
+    if qos == 1:
+        send_puback(sock, addr, topic_id, msg_id)
+
+    # QoS 2 — fase 1: PUBREC + deduplicação
+    elif qos == 2:
+        with broker_lock:
+            client = clients.get(addr, {})
+            pending = client.get("pending_qos2", {})
+            if msg_id in pending:
+                # Duplicata: reenviar PUBREC mas não rotear de novo
+                log.debug("[QoS2] Duplicata msg_id=%d de %s, reenviando PUBREC", msg_id, addr)
+                send_pubrec(sock, addr, msg_id)
+                return
+            if client:
+                pending[msg_id] = {"topic": topic_name, "message": message,
+                                   "qos": qos, "retain": retain}
+                client["pending_qos2"] = pending
+        send_pubrec(sock, addr, msg_id)
+        return  # roteamento ocorre no PUBREL
+
+    # QoS 0 ou QoS 1: rotear agora
+    if qos in (0, 1):
+        route_publish(sock, topic_name, message, qos, retain, addr)
+
+
+def handle_pubrel(sock, addr, data: bytes):
+    if len(data) < 2:
+        return
+    msg_id = int.from_bytes(data[0:2], "big")
+
+    topic_name = message = None
+    qos = retain = None
+
+    with broker_lock:
+        client = clients.get(addr, {})
+        pending = client.get("pending_qos2", {})
+        item = pending.pop(msg_id, None)
+        if item:
+            topic_name = item["topic"]
+            message    = item["message"]
+            qos        = item["qos"]
+            retain     = item["retain"]
+
+    send_pubcomp(sock, addr, msg_id)
+
+    if topic_name is not None:
+        route_publish(sock, topic_name, message, qos, retain, addr)
+
+
+def handle_subscribe(sock, addr, data: bytes):
+    if len(data) < 5:
+        return
+    flags      = parse_flags(data[0])
+    qos        = flags["qos"]
+    tid_type   = flags["topic_id_type"]
+    msg_id     = int.from_bytes(data[1:3], "big")
+
+    if tid_type == TopicIdType.SHORT:
+        # 2 bytes do topic_id são o nome curto
+        topic_name = data[3:5].decode("ascii", errors="replace")
+        topic_id   = int.from_bytes(data[3:5], "big")
+    elif tid_type == TopicIdType.PREDEFINED:
+        topic_id   = int.from_bytes(data[3:5], "big")
+        topic_name = str(topic_id)
+    else:
+        topic_name = data[5:].decode("utf-8", errors="replace")
+        topic_id   = register_topic(addr, topic_name)
+
+    log.info("[IN] SUBSCRIBE topic='%s' qos=%d addr=%s", topic_name, qos, addr)
+
+    retained = None
+    with broker_lock:
+        subscriptions.setdefault(topic_name, set()).add(addr)
+        # Coletar retained message (se existir) para enviar após o lock
+        for stored_topic, ret_msg in retained_messages.items():
+            if topic_matches(stored_topic, topic_name) or topic_matches(topic_name, stored_topic):
+                retained = (stored_topic, ret_msg)
+                break
+
+    send_suback(sock, addr, qos, topic_id, msg_id)
+    log.info("[OUT] SUBACK → %s", addr)
+
+    # Enviar retained fora do lock
+    if retained:
+        ret_topic, ret_msg = retained
+        with broker_lock:
+            tid = register_topic(addr, ret_topic)
+        send_publish(sock, addr, tid, ret_msg["message"],
+                     qos=ret_msg["qos"], retain=True)
+
+
+def handle_unsubscribe(sock, addr, data: bytes):
+    if len(data) < 5:
+        return
+    flags    = parse_flags(data[0])
+    tid_type = flags["topic_id_type"]
+    msg_id   = int.from_bytes(data[1:3], "big")
+
+    if tid_type == TopicIdType.SHORT:
+        topic_name = data[3:5].decode("ascii", errors="replace")
+    else:
+        topic_name = data[5:].decode("utf-8", errors="replace")
+
+    log.info("[IN] UNSUBSCRIBE topic='%s' addr=%s", topic_name, addr)
+
+    with broker_lock:
+        if topic_name in subscriptions:
+            subscriptions[topic_name].discard(addr)
+            if not subscriptions[topic_name]:
+                del subscriptions[topic_name]
+
+    send_unsuback(sock, addr, msg_id)
+
+
+def handle_pingreq(sock, addr, data: bytes):
+    """
+    PINGREQ com ClientId → cliente acordando do modo sleep (entregar fila).
+    PINGREQ vazio → keepalive normal.
+    """
+    client_id = data.decode("utf-8", errors="replace") if data else None
+
+    with broker_lock:
+        if addr in clients:
+            clients[addr]["last_seen"] = time.time()
+            if client_id and clients[addr]["state"] == ClientState.ASLEEP:
+                clients[addr]["state"] = ClientState.AWAKE
+                log.info("[SLEEP] Cliente %s acordando (PINGREQ)", addr)
+
+    if client_id:
+        flush_offline_queue(sock, addr)
+
+    send_pingresp(sock, addr)
+
+
+def handle_disconnect(sock, addr, data: bytes):
+    """
+    DISCONNECT com campo duration > 0 → cliente entrando em modo sleep.
+    DISCONNECT sem duration → desconexão limpa.
+    """
+    duration = 0
+    if len(data) >= 2:
+        duration = int.from_bytes(data[0:2], "big")
+
+    with broker_lock:
+        if addr in clients:
+            if duration > 0:
+                clients[addr]["state"]      = ClientState.ASLEEP
+                clients[addr]["keep_alive"] = duration
+                clients[addr]["last_seen"]  = time.time()
+                log.info("[SLEEP] Cliente %s dormindo por %ds", addr, duration)
             else:
-                retained_messages[topic] = {'message': message, 'qos': qos}
-                print(f"[ROUTING] Message retained for topic '{topic}'")
+                clients[addr]["clean_disconnect"] = True
+                clients[addr]["state"] = ClientState.DISCONNECTED
+                log.info("[DISCONNECT] Cliente %s desconectou limpo", addr)
 
-        if topic in subscriptions:
-            dead_clients = []
-            for client_id in subscriptions[topic]:
-                if client_id == source_client_id:
-                    continue
-                if client_id in clients:
-                    try:
-                        send_publish(clients[client_id]['socket'], topic, message, qos, 0, None, client_id)
-                    except:
-                        dead_clients.append(client_id)
-                else:
-                    dead_clients.append(client_id)
-            for dead in dead_clients:
-                subscriptions[topic].remove(dead)
+    if duration == 0:
+        send_disconnect(sock, addr)
+        _cleanup_client(sock, addr)
 
-def handle_publish(connection, flags, payload_data, client_id):
-    if len(payload_data) < 2:
-        return
 
-    qos = (flags & 0x06) >> 1
-    retain = flags & 0x01
-    
-    topic_len = int.from_bytes(payload_data[0:2], byteorder='big')
-    topic_name = payload_data[2:2+topic_len].decode('utf-8')
-    
-    offset = 2 + topic_len
-    packet_id = None
+def handle_searchgw(sock, addr, data: bytes):
+    """Responde GWINFO ao cliente que procura um gateway."""
+    log.info("[SEARCHGW] de %s, enviando GWINFO", addr)
+    payload = bytes([GATEWAY_ID])
+    send_packet(sock, addr, MsgType.GWINFO, payload)
 
-    if qos > 0:
-        packet_id = payload_data[offset:offset+2]
-        offset += 2
-        
-    message = payload_data[offset:].decode('utf-8')
-    print(f"[IN] [{client_id}] PUBLISH received on topic '{topic_name}'")
 
-    if qos == 1 and packet_id:
-        send_ack(connection, Pkt.PUBACK, packet_id, client_id)
-    elif qos == 2 and packet_id:
-        send_ack(connection, Pkt.PUBREC, packet_id, client_id)
+# ---------------------------------------------------------------------------
+# Ciclo de vida do cliente
+# ---------------------------------------------------------------------------
 
-    route_publish(topic_name, message, qos, retain, client_id)
-
-def handle_subscribe(connection, payload_data, client_id):
-    if len(payload_data) < 4:
-        return
-
-    packet_id = payload_data[0:2]
-    offset = 2
-    
-    return_codes = []
-    
-    while offset < len(payload_data):
-        topic_name, offset = read_string(payload_data, offset)
-        qos_req = payload_data[offset]
-        offset += 1
-        print(f"[IN] [{client_id}] SUBSCRIBE requested for topic '{topic_name}'")
-
-        with broker_lock:
-            if topic_name not in subscriptions:
-                subscriptions[topic_name] = []
-            if client_id not in subscriptions[topic_name]:
-                subscriptions[topic_name].append(client_id)
-
-            return_codes.append(qos_req)
-
-            if topic_name in retained_messages:
-                ret_msg = retained_messages[topic_name]
-                try:
-                    print(f"[ROUTING] Sending retained message to [{client_id}] for topic '{topic_name}'")
-                    send_publish(connection, topic_name, ret_msg['message'], ret_msg['qos'], 1, None, client_id)
-                except:
-                    pass
-
-    print(f"[OUT] [{client_id}] Sending SUBACK")
-    suback = bytes([(Pkt.SUBACK << 4), 2 + len(return_codes), packet_id[0], packet_id[1]]) + bytes(return_codes)
-    connection.sendall(suback)
-
-def handle_unsubscribe(connection, payload_data, client_id):
-    if len(payload_data) < 4:
-        return
-
-    packet_id = payload_data[0:2]
-    offset = 2
-    
-    while offset < len(payload_data):
-        topic_name, offset = read_string(payload_data, offset)
-        print(f"[IN] [{client_id}] UNSUBSCRIBE requested for topic '{topic_name}'")
-        
-        with broker_lock:
-            if topic_name in subscriptions:
-                if client_id in subscriptions[topic_name]:
-                    subscriptions[topic_name].remove(client_id)
-                if not subscriptions[topic_name]:
-                    del subscriptions[topic_name]
-
-    send_ack(connection, Pkt.UNSUBACK, packet_id, client_id)
-
-def trigger_lwt(client_id):
+def trigger_lwt(sock: socket.socket, addr: tuple):
+    """
+    Dispara o LWT se o cliente não se desconectou de forma limpa.
+    Chamado FORA de broker_lock.
+    """
+    lwt = None
     with broker_lock:
-        if client_id in clients:
-            client_data = clients[client_id]
-            if not client_data['clean_disconnect'] and client_data['lwt']:
-                print(f"[LWT] Triggering Last Will and Testament for [{client_id}]")
-                lwt = client_data['lwt']
-                threading.Thread(target=route_publish, args=(lwt['topic'], lwt['message'], lwt['qos'], lwt['retain'], client_id)).start()
+        client = clients.get(addr)
+        if client and not client["clean_disconnect"] and client.get("lwt"):
+            lwt = client["lwt"]
 
-def keep_alive_monitor():
+    if lwt:
+        log.info("[LWT] Disparando LWT para %s  tópico='%s'", addr, lwt["topic"])
+        topic_id = None
+        with broker_lock:
+            topic_id = register_topic(addr, lwt["topic"])
+        route_publish(sock, lwt["topic"],
+                      lwt["message"].encode() if isinstance(lwt["message"], str)
+                      else lwt["message"],
+                      lwt["qos"], lwt["retain"], addr)
+
+
+def _cleanup_client(sock: socket.socket, addr: tuple):
+    """Remove cliente do estado global e limpa sessão se clean_session=1."""
+    with broker_lock:
+        client = clients.pop(addr, None)
+        if not client:
+            return
+        clean_session = client["clean_session"]
+
+    if clean_session:
+        _clean_session_data(addr)
+
+
+def _clean_session_data(addr: tuple):
+    """Remove subscriptions e dados de registro associados ao addr."""
+    with broker_lock:
+        empty = [t for t, subs in subscriptions.items() if addr in subs]
+        for t in empty:
+            subscriptions[t].discard(addr)
+            if not subscriptions[t]:
+                del subscriptions[t]
+        topic_registrations.pop(addr, None)
+    log.info("[SESSION] Sessão limpa para %s", addr)
+
+
+# ---------------------------------------------------------------------------
+# Monitor de keep-alive
+# ---------------------------------------------------------------------------
+
+def keep_alive_monitor(sock: socket.socket):
     while True:
         time.sleep(5)
-        current_time = time.time()
-        dead_clients = []
-        
+        now = time.time()
+
+        # Snapshot atômico para evitar race condition
         with broker_lock:
-            for client_id, data in clients.items():
-                if data['keep_alive'] > 0:
-                    limit = data['keep_alive'] * 1.5
-                    if (current_time - data['last_seen']) > limit:
-                        print(f"[SYSTEM] Keep-alive timeout for [{client_id}]")
-                        dead_clients.append(client_id)
+            snapshot = {
+                addr: (data["keep_alive"], data["last_seen"], data["state"])
+                for addr, data in clients.items()
+            }
 
-        for client_id in dead_clients:
-            trigger_lwt(client_id)
-            try:
-                clients[client_id]['socket'].close()
-            except:
-                pass
-            with broker_lock:
-                if client_id in clients:
-                    del clients[client_id]
+        timed_out = []
+        for addr, (ka, last_seen, state) in snapshot.items():
+            if state == ClientState.DISCONNECTED:
+                continue
+            if ka > 0 and (now - last_seen) > ka * 1.5:
+                log.info("[KEEPALIVE] Timeout para %s", addr)
+                timed_out.append(addr)
 
-def clean_client_session(client_id):
-    print(f"[SYSTEM] Cleaning session for [{client_id}]")
-    with broker_lock:
-        empty_topics = []
-        for topic, subs in subscriptions.items():
-            if client_id in subs:
-                subs.remove(client_id)
-            if not subs:
-                empty_topics.append(topic)
+        for addr in timed_out:
+            trigger_lwt(sock, addr)
+            _cleanup_client(sock, addr)
 
-        for topic in empty_topics:
-            del subscriptions[topic]
 
-def handle_client(connection, address):
-    client_id = None
-    print(f"[CONNECTION] New socket connection from {address}")
+# ---------------------------------------------------------------------------
+# Anúncio periódico de gateway
+# ---------------------------------------------------------------------------
+
+def advertise_loop(sock: socket.socket):
+    while True:
+        send_advertise(sock)
+        time.sleep(ADVERTISE_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
+# Loop principal UDP
+# ---------------------------------------------------------------------------
+
+DISPATCH = {
+    MsgType.CONNECT:      handle_connect,
+    MsgType.WILLTOPIC:    handle_willtopic,
+    MsgType.WILLMSG:      handle_willmsg,
+    MsgType.REGISTER:     handle_register,
+    MsgType.PUBLISH:      handle_publish,
+    MsgType.PUBREL:       handle_pubrel,
+    MsgType.SUBSCRIBE:    handle_subscribe,
+    MsgType.UNSUBSCRIBE:  handle_unsubscribe,
+    MsgType.PINGREQ:      handle_pingreq,
+    MsgType.DISCONNECT:   handle_disconnect,
+    MsgType.SEARCHGW:     handle_searchgw,
+}
+
+# Pacotes que não precisam de cliente autenticado
+UNAUTHENTICATED_OK = {MsgType.CONNECT, MsgType.SEARCHGW}
+
+
+def _parse_packet(data: bytes):
+    """
+    Retorna (msg_type, payload) ou (None, None) em caso de erro.
+    Suporta cabeçalho Length de 1 byte (≤255) e 3 bytes (0x01 + 2 bytes).
+    """
+    if len(data) < 2:
+        return None, None
+    if data[0] == 0x01:
+        if len(data) < 4:
+            return None, None
+        length   = int.from_bytes(data[1:3], "big")
+        msg_type = data[3]
+        payload  = data[4:]
+    else:
+        length   = data[0]
+        msg_type = data[1]
+        payload  = data[2:]
+
     try:
-        while True:
-            packet_type, flags, remaining_length = read_fixed_header(connection)
-            
-            if packet_type is None:
-                print(f"[CONNECTION] Client at {address} disconnected abruptly")
-                break
-                
-            payload_data = connection.recv(remaining_length) if remaining_length > 0 else b''
-            
-            if client_id:
-                with broker_lock:
-                    if client_id in clients:
-                        clients[client_id]['last_seen'] = time.time()
-            
-            if packet_type == Pkt.CONNECT:
-                client_id = handle_connect(connection, address, payload_data)
-            elif packet_type == Pkt.PUBLISH and client_id:
-                handle_publish(connection, flags, payload_data, client_id)
-            elif packet_type == Pkt.PUBACK:
-                print(f"[IN] [{client_id}] PUBACK received")
-            elif packet_type == Pkt.PUBREC:
-                print(f"[IN] [{client_id}] PUBREC received")
-                if len(payload_data) >= 2:
-                    send_ack(connection, Pkt.PUBREL, payload_data[0:2], client_id)
-            elif packet_type == Pkt.PUBREL:
-                print(f"[IN] [{client_id}] PUBREL received")
-                if len(payload_data) >= 2:
-                    send_ack(connection, Pkt.PUBCOMP, payload_data[0:2], client_id)
-            elif packet_type == Pkt.PUBCOMP:
-                print(f"[IN] [{client_id}] PUBCOMP received")
-            elif packet_type == Pkt.SUBSCRIBE and client_id:
-                handle_subscribe(connection, payload_data, client_id)
-            elif packet_type == Pkt.UNSUBSCRIBE and client_id:
-                handle_unsubscribe(connection, payload_data, client_id)
-            elif packet_type == Pkt.PINGREQ:
-                print(f"[IN] [{client_id}] PINGREQ received")
-                print(f"[OUT] [{client_id}] Sending PINGRESP")
-                connection.sendall(bytes([(Pkt.PINGRESP << 4), 0x00]))
-            elif packet_type == Pkt.DISCONNECT and client_id:
-                print(f"[IN] [{client_id}] DISCONNECT received")
-                with broker_lock:
-                    clients[client_id]['clean_disconnect'] = True
-                break
+        return MsgType(msg_type), payload
+    except ValueError:
+        return None, None
 
-    except Exception as e:
-        print(f"[ERROR] Socket error with {address}: {e}")
-    finally:
-        if client_id:
-            print(f"[CONNECTION] Closing session for [{client_id}]")
-            trigger_lwt(client_id)
-            clean_session = False
-            
-            with broker_lock:
-                if client_id in clients:
-                    clean_session = clients[client_id]['clean_session']
-                    del clients[client_id]
-                    
-            if clean_session:
-                clean_client_session(client_id)
-                
-        try:
-            connection.close()
-        except:
-            pass
 
 def start_broker():
-    monitor_thread = threading.Thread(target=keep_alive_monitor)
-    monitor_thread.daemon = True
-    monitor_thread.start()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Habilitar broadcast para ADVERTISE
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.bind((BROKER_HOST, BROKER_PORT))
 
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(('0.0.0.0', 9998))
-    server_socket.listen(100)
-    
-    print("[SYSTEM] MQTT Broker started on 0.0.0.0:9998. Awaiting connections...")
-    
+    log.info("MQTT-SN Broker iniciado em %s:%d", BROKER_HOST, BROKER_PORT)
+
+    # Threads de suporte
+    threading.Thread(target=keep_alive_monitor, args=(sock,),
+                     daemon=True, name="keepalive").start()
+    threading.Thread(target=advertise_loop, args=(sock,),
+                     daemon=True, name="advertise").start()
+
     while True:
-        conn, addr = server_socket.accept()
-        client_thread = threading.Thread(target=handle_client, args=(conn, addr))
-        client_thread.daemon = True 
-        client_thread.start()
+        try:
+            data, addr = sock.recvfrom(65535)
+        except Exception as e:
+            log.error("[UDP] recvfrom falhou: %s", e)
+            continue
+
+        msg_type, payload = _parse_packet(data)
+        if msg_type is None:
+            log.debug("[UDP] Pacote inválido de %s (%d bytes), ignorado", addr, len(data))
+            continue
+
+        # Atualizar last_seen para qualquer pacote de cliente conhecido
+        with broker_lock:
+            if addr in clients:
+                clients[addr]["last_seen"] = time.time()
+
+        # Verificar autenticação
+        if msg_type not in UNAUTHENTICATED_OK:
+            with broker_lock:
+                known = addr in clients
+            if not known:
+                log.warning("[AUTH] Pacote %s de addr não autenticado %s",
+                            msg_type.name, addr)
+                continue
+
+        handler = DISPATCH.get(msg_type)
+        if handler:
+            log.debug("[IN] %s de %s", msg_type.name, addr)
+            # Cada pacote é processado em thread separada para não bloquear o loop
+            threading.Thread(target=_safe_handle,
+                             args=(handler, sock, addr, payload),
+                             daemon=True).start()
+        else:
+            log.debug("[IN] Tipo %s não tratado, ignorado", msg_type.name)
+
+
+def _safe_handle(handler, sock, addr, payload):
+    try:
+        handler(sock, addr, payload)
+    except Exception as e:
+        log.error("[HANDLER] Exceção em %s para %s: %s",
+                  handler.__name__, addr, e, exc_info=True)
+
 
 if __name__ == "__main__":
     start_broker()

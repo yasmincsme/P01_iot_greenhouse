@@ -13,7 +13,7 @@ services:
     command: python3 light_virtual_sensor.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.103.10"
+      BROKER_IP: broker
       BROKER_PORT: "9998"
 
   temperature_sensor:
@@ -22,7 +22,7 @@ services:
     command: python3 temperature_virtual_sensor.py 
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.103.10"
+      BROKER_IP: broker
       BROKER_PORT: "9998"
 
   gas_sensor:
@@ -31,7 +31,7 @@ services:
     command: python3 gas_virtual_sensor.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.103.10"
+      BROKER_IP: broker
       BROKER_PORT: "9998"
 
   humidity_sensor:
@@ -40,7 +40,7 @@ services:
     command: python3 humidity_virtual_sensor.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.103.10"
+      BROKER_IP: broker
       BROKER_PORT: "9998"
 
   act_irrigation:
@@ -49,7 +49,7 @@ services:
     command: python3 act_irrigation.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.103.10"
+      BROKER_IP: broker
       BROKER_PORT: "9998"
 
   act_curtain:
@@ -58,7 +58,7 @@ services:
     command: python3 act_curtain.py
     restart: unless-stopped
     environment:
-      BROKER_IP: "172.16.103.10"
+      BROKER_IP: broker
       BROKER_PORT: "9998"
 
   # client:
